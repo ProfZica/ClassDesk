@@ -146,7 +146,7 @@ function ForbiddenPairAdder({ students, onAdd }) {
   );
 }
 
-function ClassRoom({ classId }) {
+function ClassRoom({ classId, onNameChange }) {
   const [setupDone, setSetupDone] = useState(false);
   const [layout, setLayout] = useState(DEFAULT_LAYOUT);
   const [students, setStudents] = useState([]);
@@ -266,25 +266,35 @@ function ClassRoom({ classId }) {
   }
 
   // Controlla i vincoli di posizione: prima fila, ultima fila, o vicino al corridoio
+  // Restituisce le righe attive della griglia in ordine (dalla cattedra in poi)
+  function activeRows() {
+    const rows = new Set();
+    for (let r = 0; r < layout.grid.rows; r++) {
+      for (let c = 0; c < layout.grid.cols; c++) {
+        if (layout.grid.cells[`${r}_${c}`]) rows.add(r);
+      }
+    }
+    return Array.from(rows).sort((a,b) => a-b);
+  }
+
   function checkPositionConstraints(map) {
     const constraints = layout.positionConstraints || {};
     const names = Object.keys(constraints);
     if (names.length === 0) return true;
-
-    const fr = frontRowIndex(layout.grid);
-    const lr = lastRowIndex(layout.grid);
-    const aisleKeys = aisleAdjacentKeys(layout.grid);
+    const rows = activeRows();
 
     for (const name of names) {
-      const type = constraints[name];
-      if (!students.includes(name)) continue; // studente rimosso ma vincolo ancora presente
+      const type = constraints[name]; // "row_0", "row_1", ecc.
+      if (!students.includes(name)) continue;
       const seatKey = Object.keys(map).find(k => map[k] === name);
       if (!seatKey) continue;
       const [r] = seatKey.split("_").map(Number);
-
-      if (type === "front" && r !== fr) return false;
-      if (type === "back"  && r !== lr) return false;
-      if (type === "aisle" && !aisleKeys.includes(seatKey)) return false;
+      if (type.startsWith("row_")) {
+        const targetRowIdx = Number(type.split("_")[1]); // indice nell'array righe attive
+        const targetRow = rows[targetRowIdx];
+        if (targetRow === undefined) continue;
+        if (r !== targetRow) return false;
+      }
     }
     return true;
   }
@@ -356,10 +366,21 @@ function ClassRoom({ classId }) {
     const constraints = layout.positionConstraints || {};
     const required = layout.requiredPairs || [];
 
+    const activeRowList = [];
+    for (let r = 0; r < layout.grid.rows; r++) {
+      for (let c = 0; c < layout.grid.cols; c++) {
+        if (layout.grid.cells[`${r}_${c}`]) { activeRowList.push(r); break; }
+      }
+    }
+    const uniqueActiveRows = [...new Set(activeRowList)].sort((a,b)=>a-b);
+
     function keysForType(type) {
-      if (type === "front") return keys.filter(k => Number(k.split("_")[0]) === fr && !usedKeys.has(k));
-      if (type === "back") return keys.filter(k => Number(k.split("_")[0]) === lr && !usedKeys.has(k));
-      if (type === "aisle") return keys.filter(k => aisleKeys.includes(k) && !usedKeys.has(k));
+      if (type.startsWith("row_")) {
+        const rowIdx = Number(type.split("_")[1]);
+        const targetRow = uniqueActiveRows[rowIdx];
+        if (targetRow === undefined) return [];
+        return keys.filter(k => Number(k.split("_")[0]) === targetRow && !usedKeys.has(k));
+      }
       return [];
     }
 
@@ -367,10 +388,7 @@ function ClassRoom({ classId }) {
     // Prima i vincoli "aisle" (più difficili da soddisfare perché i posti sono meno),
     // poi front/back, così riduciamo i conflitti tra vincolati
     const constrainedNames = shuffle(Object.keys(constraints).filter(n => students.includes(n)))
-      .sort((a, b) => {
-        const order = { aisle: 0, front: 1, back: 2 };
-        return (order[constraints[a]] ?? 3) - (order[constraints[b]] ?? 3);
-      });
+;
     constrainedNames.forEach(name => {
       if (usedStudents.has(name)) return;
       // Prima prova solo tra le celle libere del tipo richiesto
@@ -379,9 +397,12 @@ function ClassRoom({ classId }) {
       // checkPositionConstraints farà da guardia finale
       if (candidates.length === 0) {
         const allOfType = keys.filter(k => {
-          if (constraints[name] === "front") return Number(k.split("_")[0]) === fr;
-          if (constraints[name] === "back")  return Number(k.split("_")[0]) === lr;
-          if (constraints[name] === "aisle") return aisleKeys.includes(k);
+          const type = constraints[name];
+          if (type.startsWith("row_")) {
+            const rowIdx = Number(type.split("_")[1]);
+            const targetRow = uniqueActiveRows[rowIdx];
+            return Number(k.split("_")[0]) === targetRow;
+          }
           return false;
         });
         candidates = shuffle(allOfType);
@@ -701,9 +722,13 @@ function ClassRoom({ classId }) {
           <label style={{ fontSize:12, color:"#888", fontWeight:"bold" }}>NOME CLASSE</label>
           <input
             value={layout.className}
-            onChange={e => persistLayout({ ...layout, className: e.target.value })}
+            onChange={e => {
+              persistLayout({ ...layout, className: e.target.value });
+              if (onNameChange) onNameChange(e.target.value);
+            }}
             style={{ width:"100%", marginTop:6, padding:"8px 12px", borderRadius:8,
-              border:"1.5px solid #4a6fa5", fontFamily:"Georgia,serif", fontSize:15, color:"#2c3e6b" }}
+              border:"1.5px solid #4a6fa5", fontFamily:"Georgia,serif", fontSize:15, color:"#2c3e6b",
+              boxSizing:"border-box" }}
           />
         </div>
 
@@ -815,9 +840,18 @@ function ClassRoom({ classId }) {
                       style={{ padding:"5px 10px", borderRadius:8, border:"1.5px solid #4a6fa5", fontFamily:"Georgia,serif", fontSize:12, color:"#2c3e6b" }}
                     >
                       <option value="">Nessun vincolo</option>
-                      <option value="front">Prima fila</option>
-                      <option value="back">Ultima fila</option>
-                      <option value="aisle">Vicino al corridoio</option>
+                      {(() => {
+                        const rows = [];
+                        for (let r = 0; r < layout.grid.rows; r++) {
+                          for (let c = 0; c < layout.grid.cols; c++) {
+                            if (layout.grid.cells[`${r}_${c}`]) { rows.push(r); break; }
+                          }
+                        }
+                        const unique = [...new Set(rows)].sort((a,b)=>a-b);
+                        return unique.map((rowVal, idx) => (
+                          <option key={idx} value={`row_${idx}`}>Fila {idx+1}</option>
+                        ));
+                      })()}
                     </select>
                   </div>
                 );
@@ -952,7 +986,7 @@ function ClassRoom({ classId }) {
       </div>
 
       <div className="no-print" style={{ display: "flex", gap: 0, background: "#2c3e6b", paddingLeft: 28, flexWrap:"wrap" }}>
-        {[["layout","📐 Piantina"],["manual","✏️ Manuale"],["students","👥 Studenti"],["history","📅 Storico"],["dashboard","📊 Dashboard"],["settings","⚙️ Impostazioni"]].map(([key, label]) => (
+        {[["layout","📐 Piantina"],["manual","✏️ Manuale"],["students","👥 Studenti"],["history","📅 Storico"],["dashboard","📊 Dashboard"],["settings","⚙️ Impostazioni"],["help","❓ Guida"]].map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)} style={{
             background: tab === key ? "#f8f4ef" : "transparent",
             color: tab === key ? "#2c3e6b" : "#aac4e8",
@@ -981,6 +1015,61 @@ function ClassRoom({ classId }) {
       <div style={{ maxWidth: 820, margin: "0 auto", padding: "24px 16px" }}>
 
         {tab === "settings" && renderSettings()}
+
+        {/* ── TAB: GUIDA ── */}
+        {tab === "help" && (
+          <div>
+            <div style={{ fontWeight:"bold", color:"#2c3e6b", fontSize:18, marginBottom:6 }}>❓ Come funziona ClassDesk</div>
+            <div style={{ color:"#888", fontSize:13, marginBottom:24 }}>Guida rapida per usare l'app al meglio.</div>
+
+            {[
+              {
+                icon:"⚙️", title:"1. Configura la classe",
+                text:"Vai in Impostazioni e dai un nome alla classe. Poi disegna la piantina toccando le celle della griglia: le celle blu sono banchi attivi, quelle grigie sono spazi vuoti (corridoi). Puoi aggiungere o rimuovere righe e colonne con i pulsanti + e −."
+              },
+              {
+                icon:"👥", title:"2. Aggiungi gli studenti",
+                text:"Nella tab Studenti inserisci i nomi uno per uno. Spunta la casella 'Mai vicini' per gli studenti che non devono mai sedere affiancati tra loro (es. per dividere un gruppo). Puoi anche impostare per ogni studente una fila fissa (Fila 1, Fila 2, ecc.) dalle Impostazioni."
+              },
+              {
+                icon:"🎲", title:"3. Genera la disposizione",
+                text:"Seleziona il mese dal menu nella tab Piantina e clicca Genera disposizione. L'app prova migliaia di combinazioni e sceglie quella che rispetta tutte le regole: nessuna coppia ripetuta rispetto allo storico, rotazione delle file, vincoli personali."
+              },
+              {
+                icon:"✏️", title:"4. Inserimento manuale",
+                text:"Se preferisci decidere tu la disposizione, vai nella tab Manuale. Scegli il mese, assegna ogni studente al suo banco tramite i menu a tendina e salva. L'app evidenzia in rosso i duplicati e avvisa se qualcuno non è ancora stato assegnato."
+              },
+              {
+                icon:"🤝", title:"5. Regole automatiche",
+                text:"L'algoritmo rispetta sempre tre regole: 1) Le coppie adiacenti vengono cambiate ogni mese, confrontando con tutto lo storico. 2) Chi era in prima fila un mese va in una fila diversa il mese dopo. 3) I vincoli personali (mai vicini, sempre vicini, fila fissa) vengono rispettati prima di tutto il resto."
+              },
+              {
+                icon:"📊", title:"6. Dashboard e Storico",
+                text:"La Dashboard mostra quante volte ogni coppia di studenti si è seduta vicina, con colori dal verde (1 volta) al rosso (4+). Lo Storico conserva tutte le disposizioni dell'anno. Puoi eliminarle singolarmente o cancellare tutto."
+              },
+              {
+                icon:"📷", title:"7. Salva come immagine",
+                text:"Nella tab Piantina, dopo aver generato la disposizione, clicca Salva immagine per esportare la piantina del mese come file PNG. Puoi stamparla, allegarla al registro o inviarla ai colleghi."
+              },
+              {
+                icon:"🏫", title:"8. Più classi",
+                text:"Clicca la freccia ← Classi in alto a sinistra per tornare alla schermata principale. Da lì puoi creare e gestire quante classi vuoi — ognuna con la propria piantina, studenti, regole e storico completamente separati."
+              },
+            ].map((item, i) => (
+              <div key={i} style={{ background:"#fff", borderRadius:12, padding:"18px 20px", marginBottom:12, boxShadow:"0 1px 8px #0001", display:"flex", gap:16, alignItems:"flex-start" }}>
+                <div style={{ fontSize:28, flexShrink:0, marginTop:2 }}>{item.icon}</div>
+                <div>
+                  <div style={{ fontWeight:"bold", color:"#2c3e6b", fontSize:15, marginBottom:6 }}>{item.title}</div>
+                  <div style={{ fontSize:13, color:"#666", lineHeight:1.6 }}>{item.text}</div>
+                </div>
+              </div>
+            ))}
+
+            <div style={{ background:"#dce8f5", borderRadius:12, padding:"16px 20px", marginTop:8, fontSize:13, color:"#2c3e6b" }}>
+              <strong>💡 Consiglio:</strong> i dati vengono salvati automaticamente sul tuo dispositivo — non serve premere nessun pulsante di salvataggio manuale (tranne che per la disposizione manuale). Se cambi dispositivo o browser, i dati non si trasferiscono automaticamente.
+            </div>
+          </div>
+        )}
 
         {tab === "layout" && (
           <div>
@@ -1336,7 +1425,11 @@ export default function App() {
           }}>← Classi</button>
           <span style={{ fontWeight: 'bold', fontSize: 16 }}>{activeClass.name}</span>
         </div>
-        <ClassRoom classId={activeClass.id} />
+        <ClassRoom classId={activeClass.id} onNameChange={name => {
+          const updated = classes.map(c => c.id === activeClass.id ? { ...c, name } : c);
+          saveClasses(updated);
+          setActiveClass(prev => ({ ...prev, name }));
+        }} />
       </div>
     );
   }
