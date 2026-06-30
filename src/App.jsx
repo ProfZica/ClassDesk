@@ -1,4 +1,11 @@
 import { useState, useEffect, useRef } from "react";
+import {
+  isFirebaseReady, onAuthChange, registerWithEmail, loginWithEmail,
+  loginWithGoogle, resetPassword, signOut,
+  fetchClassesList, saveClassMeta, deleteClassCloud,
+  fetchClassData, saveClassData,
+  migrateLocalDataToCloud, hasLocalDataToMigrate
+} from "./firebaseStore";
 
 const MONTHS_IT = [
   "Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno",
@@ -121,7 +128,7 @@ function ForbiddenPairAdder({ students, onAdd, label = "+ Aggiungi", color = "#4
   );
 }
 
-function ClassRoom({ classId, initialName, onNameChange }) {
+function ClassRoom({ classId, initialName, onNameChange, cloudUser }) {
   const [setupDone, setSetupDone] = useState(false);
   const [layout, setLayout] = useState(DEFAULT_LAYOUT);
   const [students, setStudents] = useState([]);
@@ -138,31 +145,68 @@ function ClassRoom({ classId, initialName, onNameChange }) {
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [notice, setNotice] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const piantinaRef = useRef(null);
 
+  // Carica i dati della classe: da Firestore se l'utente è loggato, altrimenti da localStorage
   useEffect(() => {
     if (!classId) return;
-    try {
-      const savedSetup = localStorage.getItem(`cd_${classId}_setup_done`);
-      const savedLayout = localStorage.getItem(`cd_${classId}_layout`);
-      const savedStudents = localStorage.getItem(`cd_${classId}_students`);
-      const savedMales = localStorage.getItem(`cd_${classId}_never_adj`);
-      const savedHistory = localStorage.getItem(`cd_${classId}_history`);
+    let cancelled = false;
 
-      if (savedSetup === "true") setSetupDone(true);
-      if (savedLayout) {
-        const parsed = JSON.parse(savedLayout);
-        setLayout(parsed);
-        setMonth(parsed.schoolYearStart.month);
-        setYear(parsed.schoolYearStart.year);
-      } else if (initialName) {
-        // Prima apertura: usa il nome inserito nell'elenco classi
-        setLayout(prev => ({ ...prev, className: initialName }));
+    async function loadFromCloud() {
+      try {
+        const data = await fetchClassData(cloudUser.uid, classId);
+        if (cancelled) return;
+        if (data) {
+          if (data.setupDone) setSetupDone(true);
+          if (data.layout) {
+            setLayout(data.layout);
+            setMonth(data.layout.schoolYearStart.month);
+            setYear(data.layout.schoolYearStart.year);
+          } else if (initialName) {
+            setLayout(prev => ({ ...prev, className: initialName }));
+          }
+          if (data.students) setStudents(data.students);
+          if (data.neverAdjacent) setNeverAdjacentStudents(data.neverAdjacent);
+          if (data.history) setHistory(data.history);
+        } else if (initialName) {
+          setLayout(prev => ({ ...prev, className: initialName }));
+        }
+      } catch (e) {
+        console.error("Errore caricamento dati classe da cloud:", e);
+      } finally {
+        if (!cancelled) setDataLoaded(true);
       }
-      if (savedStudents) setStudents(JSON.parse(savedStudents));
-      if (savedMales) setNeverAdjacentStudents(JSON.parse(savedMales));
-      if (savedHistory) setHistory(JSON.parse(savedHistory));
-    } catch {}
+    }
+
+    function loadFromLocal() {
+      try {
+        const savedSetup = localStorage.getItem(`cd_${classId}_setup_done`);
+        const savedLayout = localStorage.getItem(`cd_${classId}_layout`);
+        const savedStudents = localStorage.getItem(`cd_${classId}_students`);
+        const savedMales = localStorage.getItem(`cd_${classId}_never_adj`);
+        const savedHistory = localStorage.getItem(`cd_${classId}_history`);
+
+        if (savedSetup === "true") setSetupDone(true);
+        if (savedLayout) {
+          const parsed = JSON.parse(savedLayout);
+          setLayout(parsed);
+          setMonth(parsed.schoolYearStart.month);
+          setYear(parsed.schoolYearStart.year);
+        } else if (initialName) {
+          setLayout(prev => ({ ...prev, className: initialName }));
+        }
+        if (savedStudents) setStudents(JSON.parse(savedStudents));
+        if (savedMales) setNeverAdjacentStudents(JSON.parse(savedMales));
+        if (savedHistory) setHistory(JSON.parse(savedHistory));
+      } catch {}
+      setDataLoaded(true);
+    }
+
+    if (cloudUser) loadFromCloud();
+    else loadFromLocal();
+
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [classId]);
 
@@ -177,25 +221,47 @@ function ClassRoom({ classId, initialName, onNameChange }) {
     }
   }, [month, year, history, classId]);
 
+  // Le funzioni persist aggiornano subito lo stato locale (UI reattiva),
+  // poi salvano in background su Firestore (se loggato) o localStorage.
   function persistLayout(l) {
     setLayout(l);
-    try { localStorage.setItem(`cd_${classId}_layout`, JSON.stringify(l)); } catch {}
+    if (cloudUser) {
+      saveClassData(cloudUser.uid, classId, { layout: l }).catch(e => console.error(e));
+    } else {
+      try { localStorage.setItem(`cd_${classId}_layout`, JSON.stringify(l)); } catch {}
+    }
   }
   function persistStudents(s) {
     setStudents(s);
-    try { localStorage.setItem(`cd_${classId}_students`, JSON.stringify(s)); } catch {}
+    if (cloudUser) {
+      saveClassData(cloudUser.uid, classId, { students: s }).catch(e => console.error(e));
+    } else {
+      try { localStorage.setItem(`cd_${classId}_students`, JSON.stringify(s)); } catch {}
+    }
   }
   function persistNeverAdjacent(m) {
     setNeverAdjacentStudents(m);
-    try { localStorage.setItem(`cd_${classId}_never_adj`, JSON.stringify(m)); } catch {}
+    if (cloudUser) {
+      saveClassData(cloudUser.uid, classId, { neverAdjacent: m }).catch(e => console.error(e));
+    } else {
+      try { localStorage.setItem(`cd_${classId}_never_adj`, JSON.stringify(m)); } catch {}
+    }
   }
   function saveHistory(h) {
     setHistory(h);
-    try { localStorage.setItem(`cd_${classId}_history`, JSON.stringify(h)); } catch {}
+    if (cloudUser) {
+      saveClassData(cloudUser.uid, classId, { history: h }).catch(e => console.error(e));
+    } else {
+      try { localStorage.setItem(`cd_${classId}_history`, JSON.stringify(h)); } catch {}
+    }
   }
   function completeSetup() {
     setSetupDone(true);
-    try { localStorage.setItem(`cd_${classId}_setup_done`, "true"); } catch {}
+    if (cloudUser) {
+      saveClassData(cloudUser.uid, classId, { setupDone: true }).catch(e => console.error(e));
+    } else {
+      try { localStorage.setItem(`cd_${classId}_setup_done`, "true"); } catch {}
+    }
     setMonth(layout.schoolYearStart.month);
     setYear(layout.schoolYearStart.year);
   }
@@ -1339,51 +1405,345 @@ function ClassRoom({ classId, initialName, onNameChange }) {
 }
 
 
-// ── COMPONENTE ROOT: selettore classi ──────────────────────
+// ── COMPONENTE ROOT: autenticazione + selettore classi ──────
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
+// Schermata di login/registrazione
+function AuthScreen({ onLoginSuccess }) {
+  const [mode, setMode] = useState("login"); // login | register | reset
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  function friendlyError(err) {
+    const code = err?.code || "";
+    if (code.includes("email-already-in-use")) return "Esiste già un account con questa email.";
+    if (code.includes("invalid-email")) return "Email non valida.";
+    if (code.includes("weak-password")) return "La password deve avere almeno 6 caratteri.";
+    if (code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential")) return "Email o password non corretti.";
+    if (code.includes("too-many-requests")) return "Troppi tentativi. Riprova tra qualche minuto.";
+    if (code.includes("popup-closed-by-user")) return null; // l'utente ha chiuso il popup, non è un errore
+    return "Si è verificato un errore. Riprova.";
+  }
+
+  async function handleEmailAuth() {
+    setError(null); setInfo(null);
+    if (!email || !password) { setError("Inserisci email e password."); return; }
+    setLoading(true);
+    try {
+      if (mode === "login") {
+        await loginWithEmail(email, password);
+      } else if (mode === "register") {
+        await registerWithEmail(email, password);
+      }
+      onLoginSuccess();
+    } catch (err) {
+      const msg = friendlyError(err);
+      if (msg) setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGoogle() {
+    setError(null); setInfo(null);
+    setLoading(true);
+    try {
+      await loginWithGoogle();
+      onLoginSuccess();
+    } catch (err) {
+      const msg = friendlyError(err);
+      if (msg) setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleReset() {
+    setError(null); setInfo(null);
+    if (!email) { setError("Inserisci la tua email per ricevere il link di reset."); return; }
+    setLoading(true);
+    try {
+      await resetPassword(email);
+      setInfo("Email inviata! Controlla la posta per reimpostare la password.");
+    } catch (err) {
+      const msg = friendlyError(err);
+      if (msg) setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "linear-gradient(135deg, #f8f4ef 0%, #eef3f8 100%)",
+      fontFamily: "'Georgia', serif", display: "flex", alignItems: "center", justifyContent: "center",
+      padding: "20px"
+    }}>
+      <div style={{ maxWidth: 380, width: "100%" }}>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>🏫</div>
+          <div style={{ fontSize: 26, fontWeight: "bold", color: "#2c3e6b" }}>ClassDesk</div>
+          <div style={{ fontSize: 13, color: "#888", marginTop: 4 }}>
+            {mode === "login" && "Accedi al tuo account"}
+            {mode === "register" && "Crea un nuovo account"}
+            {mode === "reset" && "Recupera la password"}
+          </div>
+        </div>
+
+        <div style={{ background: "#fff", borderRadius: 16, padding: 24, boxShadow: "0 4px 20px #0001" }}>
+          {error && (
+            <div style={{ background: "#fdecea", color: "#c0392b", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 }}>
+              {error}
+            </div>
+          )}
+          {info && (
+            <div style={{ background: "#eafaf1", color: "#1e8449", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 }}>
+              {info}
+            </div>
+          )}
+
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ fontSize: 12, color: "#888", fontWeight: "bold" }}>EMAIL</label>
+            <input
+              type="email" value={email} onChange={e => setEmail(e.target.value)}
+              placeholder="nome@scuola.it"
+              style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 8,
+                border: "1.5px solid #4a6fa5", fontFamily: "Georgia,serif", fontSize: 15,
+                color: "#2c3e6b", boxSizing: "border-box" }}
+            />
+          </div>
+
+          {mode !== "reset" && (
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ fontSize: 12, color: "#888", fontWeight: "bold" }}>PASSWORD</label>
+              <input
+                type="password" value={password} onChange={e => setPassword(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") handleEmailAuth(); }}
+                placeholder="••••••••"
+                style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 8,
+                  border: "1.5px solid #4a6fa5", fontFamily: "Georgia,serif", fontSize: 15,
+                  color: "#2c3e6b", boxSizing: "border-box" }}
+              />
+            </div>
+          )}
+
+          {mode === "reset" ? (
+            <button onClick={handleReset} disabled={loading} style={{
+              width: "100%", background: "#2c3e6b", color: "#fff", border: "none",
+              borderRadius: 10, padding: "12px", fontFamily: "Georgia,serif", fontSize: 15,
+              fontWeight: "bold", opacity: loading ? 0.6 : 1, marginBottom: 10
+            }}>{loading ? "Invio..." : "Invia email di recupero"}</button>
+          ) : (
+            <button onClick={handleEmailAuth} disabled={loading} style={{
+              width: "100%", background: "#2c3e6b", color: "#fff", border: "none",
+              borderRadius: 10, padding: "12px", fontFamily: "Georgia,serif", fontSize: 15,
+              fontWeight: "bold", opacity: loading ? 0.6 : 1, marginBottom: 10
+            }}>{loading ? "Attendere..." : (mode === "login" ? "Accedi" : "Registrati")}</button>
+          )}
+
+          {mode !== "reset" && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0" }}>
+                <div style={{ flex: 1, height: 1, background: "#eee" }} />
+                <span style={{ fontSize: 11, color: "#aaa" }}>oppure</span>
+                <div style={{ flex: 1, height: 1, background: "#eee" }} />
+              </div>
+              <button onClick={handleGoogle} disabled={loading} style={{
+                width: "100%", background: "#fff", color: "#444", border: "1.5px solid #ddd",
+                borderRadius: 10, padding: "11px", fontFamily: "Georgia,serif", fontSize: 14,
+                fontWeight: "bold", opacity: loading ? 0.6 : 1, display: "flex",
+                alignItems: "center", justifyContent: "center", gap: 8
+              }}>🔵 Continua con Google</button>
+            </>
+          )}
+
+          <div style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}>
+            {mode === "login" && (
+              <>
+                <button onClick={() => { setMode("register"); setError(null); setInfo(null); }} style={{
+                  background: "none", border: "none", color: "#4a6fa5", cursor: "pointer", fontSize: 13
+                }}>Non hai un account? Registrati</button>
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={() => { setMode("reset"); setError(null); setInfo(null); }} style={{
+                    background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 12
+                  }}>Password dimenticata?</button>
+                </div>
+              </>
+            )}
+            {mode === "register" && (
+              <button onClick={() => { setMode("login"); setError(null); setInfo(null); }} style={{
+                background: "none", border: "none", color: "#4a6fa5", cursor: "pointer", fontSize: 13
+              }}>Hai già un account? Accedi</button>
+            )}
+            {mode === "reset" && (
+              <button onClick={() => { setMode("login"); setError(null); setInfo(null); }} style={{
+                background: "none", border: "none", color: "#4a6fa5", cursor: "pointer", fontSize: 13
+              }}>← Torna al login</button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 16, fontSize: 11, color: "#aaa" }}>
+          I tuoi dati sono protetti e accessibili solo dal tuo account, su qualsiasi dispositivo.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const firebaseOn = isFirebaseReady();
+
+  const [authChecked, setAuthChecked] = useState(!firebaseOn); // se Firebase non è configurato, salta direttamente
+  const [user, setUser] = useState(null);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationNotice, setMigrationNotice] = useState(null);
+
   const [classes, setClasses] = useState([]); // [{ id, name, color, createdAt }]
   const [activeClass, setActiveClass] = useState(null);
   const [newClassName, setNewClassName] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editingName, setEditingName] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [loadingClasses, setLoadingClasses] = useState(false);
 
   const COLORS = ['#2c3e6b','#27ae60','#e67e22','#8e44ad','#c0392b','#16a085','#d35400','#2980b9'];
 
+  // ── Ascolta lo stato di autenticazione ──
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('cd_classes_list');
-      if (saved) setClasses(JSON.parse(saved));
-    } catch {}
+    if (!firebaseOn) return;
+    const unsubscribe = onAuthChange(async (u) => {
+      setUser(u);
+      setAuthChecked(true);
+      if (u && hasLocalDataToMigrate()) {
+        setMigrating(true);
+        const result = await migrateLocalDataToCloud(u.uid);
+        setMigrating(false);
+        if (result.migrated > 0) {
+          setMigrationNotice(`✅ ${result.migrated} classi trovate sul dispositivo sono state caricate nel tuo account.`);
+        }
+      }
+    });
+    return unsubscribe;
   }, []);
 
-  function saveClasses(list) {
+  // ── Carica elenco classi (da cloud se loggato, da localStorage altrimenti) ──
+  useEffect(() => {
+    async function loadClasses() {
+      if (firebaseOn && user) {
+        setLoadingClasses(true);
+        try {
+          const list = await fetchClassesList(user.uid);
+          setClasses(list);
+        } catch (e) {
+          console.error("Errore caricamento classi da cloud:", e);
+        } finally {
+          setLoadingClasses(false);
+        }
+      } else if (!firebaseOn) {
+        try {
+          const saved = localStorage.getItem('cd_classes_list');
+          if (saved) setClasses(JSON.parse(saved));
+        } catch {}
+      }
+    }
+    if (authChecked) loadClasses();
+  }, [user, authChecked, migrating]);
+
+  async function saveClasses(list) {
     setClasses(list);
+    if (firebaseOn && user) {
+      // Il salvataggio su Firestore avviene per singola classe (vedi addClass/renameClass)
+      return;
+    }
     try { localStorage.setItem('cd_classes_list', JSON.stringify(list)); } catch {}
   }
 
-  function addClass() {
+  async function addClass() {
     const name = newClassName.trim();
     if (!name) return;
     const color = COLORS[classes.length % COLORS.length];
-    const newList = [...classes, { id: uid(), name, color, createdAt: Date.now() }];
-    saveClasses(newList);
+    const newClass = { id: uid(), name, color, createdAt: Date.now() };
+    const newList = [...classes, newClass];
+    setClasses(newList);
     setNewClassName('');
+
+    if (firebaseOn && user) {
+      try { await saveClassMeta(user.uid, newClass.id, { name, color, createdAt: newClass.createdAt }); }
+      catch (e) { console.error("Errore salvataggio classe su cloud:", e); }
+    } else {
+      try { localStorage.setItem('cd_classes_list', JSON.stringify(newList)); } catch {}
+    }
   }
 
-  function deleteClass(id) {
-    // Rimuovi tutti i dati della classe dal localStorage
-    const keys = ['setup_done','layout','students','never_adj','history'];
-    keys.forEach(k => { try { localStorage.removeItem(`cd_${id}_${k}`); } catch {} });
-    saveClasses(classes.filter(c => c.id !== id));
+  async function deleteClass(id) {
+    if (firebaseOn && user) {
+      try { await deleteClassCloud(user.uid, id); }
+      catch (e) { console.error("Errore eliminazione classe da cloud:", e); }
+    } else {
+      const keys = ['setup_done','layout','students','never_adj','history'];
+      keys.forEach(k => { try { localStorage.removeItem(`cd_${id}_${k}`); } catch {} });
+    }
+    const newList = classes.filter(c => c.id !== id);
+    setClasses(newList);
+    if (!firebaseOn) { try { localStorage.setItem('cd_classes_list', JSON.stringify(newList)); } catch {} }
     setConfirmDeleteId(null);
   }
 
-  function renameClass(id, name) {
-    saveClasses(classes.map(c => c.id === id ? { ...c, name } : c));
+  async function renameClass(id, name) {
+    const newList = classes.map(c => c.id === id ? { ...c, name } : c);
+    setClasses(newList);
     setEditingId(null);
+    if (firebaseOn && user) {
+      try { await saveClassMeta(user.uid, id, { name }); }
+      catch (e) { console.error("Errore rinomina classe su cloud:", e); }
+    } else {
+      try { localStorage.setItem('cd_classes_list', JSON.stringify(newList)); } catch {}
+    }
+  }
+
+  async function handleSignOut() {
+    await signOut();
+    setActiveClass(null);
+    setClasses([]);
+  }
+
+  // ── Schermata di caricamento iniziale (controllo sessione) ──
+  if (firebaseOn && !authChecked) {
+    return (
+      <div style={{
+        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+        background: "linear-gradient(135deg, #f8f4ef 0%, #eef3f8 100%)", fontFamily: "Georgia,serif"
+      }}>
+        <div style={{ textAlign: "center", color: "#888" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🏫</div>
+          Caricamento...
+        </div>
+      </div>
+    );
+  }
+
+  // ── Schermata di login se Firebase è configurato e l'utente non è loggato ──
+  if (firebaseOn && !user) {
+    return <AuthScreen onLoginSuccess={() => {}} />;
+  }
+
+  // ── Schermata di migrazione in corso ──
+  if (migrating) {
+    return (
+      <div style={{
+        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+        background: "linear-gradient(135deg, #f8f4ef 0%, #eef3f8 100%)", fontFamily: "Georgia,serif"
+      }}>
+        <div style={{ textAlign: "center", color: "#888" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>☁️</div>
+          Sincronizzazione dei dati in corso...
+        </div>
+      </div>
+    );
   }
 
   if (activeClass) {
@@ -1401,11 +1761,21 @@ export default function App() {
           }}>← Classi</button>
           <span style={{ fontWeight: 'bold', fontSize: 16 }}>{activeClass.name}</span>
         </div>
-        <ClassRoom classId={activeClass.id} initialName={activeClass.name} onNameChange={name => {
-          const updated = classes.map(c => c.id === activeClass.id ? { ...c, name } : c);
-          saveClasses(updated);
-          setActiveClass(prev => ({ ...prev, name }));
-        }} />
+        <ClassRoom
+          classId={activeClass.id}
+          initialName={activeClass.name}
+          cloudUser={firebaseOn ? user : null}
+          onNameChange={name => {
+            const updated = classes.map(c => c.id === activeClass.id ? { ...c, name } : c);
+            setClasses(updated);
+            setActiveClass(prev => ({ ...prev, name }));
+            if (firebaseOn && user) {
+              saveClassMeta(user.uid, activeClass.id, { name }).catch(e => console.error(e));
+            } else {
+              try { localStorage.setItem('cd_classes_list', JSON.stringify(updated)); } catch {}
+            }
+          }}
+        />
       </div>
     );
   }
@@ -1422,14 +1792,44 @@ export default function App() {
         color: '#fff', padding: '22px 28px 16px',
         boxShadow: '0 3px 14px #0003'
       }}>
-        <div style={{ fontSize: 26, fontWeight: 'bold', letterSpacing: 1 }}>🏫 ClassDesk</div>
-        <div style={{ fontSize: 13, opacity: .75, marginTop: 4 }}>Le tue classi</div>
-        <div style={{ fontSize: 10, opacity: .4, marginTop: 6 }}>© Pasquale Zicarelli</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontSize: 26, fontWeight: 'bold', letterSpacing: 1 }}>🏫 ClassDesk</div>
+            <div style={{ fontSize: 13, opacity: .75, marginTop: 4 }}>Le tue classi</div>
+            <div style={{ fontSize: 10, opacity: .4, marginTop: 6 }}>© Pasquale Zicarelli</div>
+          </div>
+          {firebaseOn && user && (
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, opacity: .8 }}>{user.email || "Account Google"}</div>
+              <button onClick={handleSignOut} style={{
+                marginTop: 6, background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+                borderRadius: 6, padding: '4px 10px', fontSize: 11, fontFamily: 'Georgia,serif', cursor: 'pointer'
+              }}>Esci</button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {migrationNotice && (
+        <div style={{
+          maxWidth: 600, margin: '16px auto 0', padding: '12px 18px',
+          background: '#eafaf1', color: '#1e8449', borderRadius: 10, fontSize: 13,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10
+        }}>
+          <span>{migrationNotice}</span>
+          <button onClick={() => setMigrationNotice(null)} style={{
+            background: 'transparent', border: 'none', color: 'inherit', fontSize: 16, padding: '0 4px', cursor: 'pointer'
+          }}>✕</button>
+        </div>
+      )}
 
       <div style={{ maxWidth: 600, margin: '0 auto', padding: '32px 16px' }}>
 
-        {classes.length === 0 && (
+        {loadingClasses && (
+          <div style={{ textAlign: 'center', color: '#aaa', padding: '24px 0' }}>Caricamento classi...</div>
+        )}
+
+        {!loadingClasses && classes.length === 0 && (
           <div style={{
             textAlign: 'center', color: '#aaa', padding: '48px 0 32px',
             fontSize: 15
@@ -1456,7 +1856,7 @@ export default function App() {
                     onKeyDown={e => { if (e.key === 'Enter') renameClass(cls.id, editingName.trim() || cls.name); }}
                     autoFocus
                     style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '1.5px solid #4a6fa5',
-                      fontFamily: 'Georgia,serif', fontSize: 15 }}
+                      fontFamily: 'Georgia,serif', fontSize: 15, boxSizing: 'border-box' }}
                   />
                   <button onClick={() => renameClass(cls.id, editingName.trim() || cls.name)}
                     style={{ background: '#27ae60', color: '#fff', border: 'none', borderRadius: 8,
@@ -1521,7 +1921,7 @@ export default function App() {
               onKeyDown={e => { if (e.key === 'Enter') addClass(); }}
               placeholder="Nome classe (es. 2D, 3A...)"
               style={{ flex: 1, padding: '10px 14px', borderRadius: 10,
-                border: '1.5px solid #4a6fa5', fontFamily: 'Georgia,serif', fontSize: 15 }}
+                border: '1.5px solid #4a6fa5', fontFamily: 'Georgia,serif', fontSize: 15, boxSizing: 'border-box' }}
             />
             <button onClick={addClass} style={{
               background: '#2c3e6b', color: '#fff', border: 'none', borderRadius: 10,
@@ -1530,6 +1930,12 @@ export default function App() {
             }}>Crea</button>
           </div>
         </div>
+
+        {!firebaseOn && (
+          <div style={{ marginTop: 20, fontSize: 12, color: '#aaa', textAlign: 'center', lineHeight: 1.6 }}>
+            ☁️ Sincronizzazione cloud non configurata.<br/>I dati restano salvati solo su questo dispositivo.
+          </div>
+        )}
       </div>
     </div>
   );
