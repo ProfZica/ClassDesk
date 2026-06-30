@@ -42,7 +42,7 @@ const DEFAULT_LAYOUT = {
   notes: "",
   forbiddenPairs: [], // coppie di nomi che non devono mai sedere vicine
   requiredPairs: [], // coppie di nomi che devono sempre sedere vicine
-  positionConstraints: {}, // { nomeStudente: "front" | "back" | "aisle" }
+  positionConstraints: {}, // { nomeStudente: "row_0" | "row_1" | ... } (indice fila attiva)
 };
 
 function buildSchoolYear(start) {
@@ -94,33 +94,8 @@ function frontRowIndex(grid) {
   return -1;
 }
 
-// Ultima riga attiva (più lontana dalla cattedra)
-function lastRowIndex(grid) {
-  for (let r = grid.rows - 1; r >= 0; r--) {
-    for (let c = 0; c < grid.cols; c++) {
-      if (grid.cells[`${r}_${c}`]) return r;
-    }
-  }
-  return -1;
-}
-
-// Celle "vicino al corridoio": banchi attivi che hanno almeno un lato (sinistra o destra)
-// libero/vuoto nella griglia, cioè sono il primo o ultimo banco di un blocco contiguo
-function aisleAdjacentKeys(grid) {
-  const keys = [];
-  for (let r = 0; r < grid.rows; r++) {
-    for (let c = 0; c < grid.cols; c++) {
-      if (!grid.cells[`${r}_${c}`]) continue;
-      const leftFree = !grid.cells[`${r}_${c - 1}`];
-      const rightFree = !grid.cells[`${r}_${c + 1}`];
-      if (leftFree || rightFree) keys.push(`${r}_${c}`);
-    }
-  }
-  return keys;
-}
-
-// Piccolo selettore per aggiungere una coppia vietata (due menu a tendina + pulsante)
-function ForbiddenPairAdder({ students, onAdd }) {
+// Piccolo selettore per aggiungere una coppia di studenti (due menu a tendina + pulsante)
+function ForbiddenPairAdder({ students, onAdd, label = "+ Aggiungi", color = "#4a6fa5" }) {
   const [a, setA] = useState("");
   const [b, setB] = useState("");
   return (
@@ -140,8 +115,8 @@ function ForbiddenPairAdder({ students, onAdd }) {
         {students.map(s => <option key={s} value={s}>{s}</option>)}
       </select>
       <button onClick={() => { if (a && b && a !== b) { onAdd(a, b); setA(""); setB(""); } }} style={{
-        background:"#4a6fa5", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", fontSize:12, fontFamily:"Georgia,serif"
-      }}>+ Aggiungi divieto</button>
+        background:color, color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", fontSize:12, fontFamily:"Georgia,serif"
+      }}>{label}</button>
     </div>
   );
 }
@@ -188,7 +163,8 @@ function ClassRoom({ classId, initialName, onNameChange }) {
       if (savedMales) setNeverAdjacentStudents(JSON.parse(savedMales));
       if (savedHistory) setHistory(JSON.parse(savedHistory));
     } catch {}
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [classId]);
 
   useEffect(() => {
     const key = `${year}_${month}`;
@@ -363,9 +339,6 @@ function ClassRoom({ classId, initialName, onNameChange }) {
     const usedKeys = new Set();
     const usedStudents = new Set();
 
-    const fr = frontRowIndex(layout.grid);
-    const lr = lastRowIndex(layout.grid);
-    const aisleKeys = aisleAdjacentKeys(layout.grid);
     const constraints = layout.positionConstraints || {};
     const required = layout.requiredPairs || [];
 
@@ -775,7 +748,7 @@ function ClassRoom({ classId, initialName, onNameChange }) {
             </div>
           ))}
           {students.length >= 2 ? (
-            <ForbiddenPairAdder students={students} onAdd={(a, b) => {
+            <ForbiddenPairAdder students={students} label="+ Aggiungi" color="#c0392b" onAdd={(a, b) => {
               const current = layout.forbiddenPairs || [];
               const exists = current.some(([x,y]) => (x===a&&y===b)||(x===b&&y===a));
               if (!exists && a !== b) {
@@ -805,7 +778,7 @@ function ClassRoom({ classId, initialName, onNameChange }) {
             </div>
           ))}
           {students.length >= 2 ? (
-            <ForbiddenPairAdder students={students} onAdd={(a, b) => {
+            <ForbiddenPairAdder students={students} label="+ Aggiungi" color="#27ae60" onAdd={(a, b) => {
               const current = layout.requiredPairs || [];
               const exists = current.some(([x,y]) => (x===a&&y===b)||(x===b&&y===a));
               if (!exists && a !== b) {
@@ -821,7 +794,7 @@ function ClassRoom({ classId, initialName, onNameChange }) {
         <div style={{ background:"#fff", borderRadius:12, padding:"16px 18px", marginBottom:16, boxShadow:"0 1px 8px #0001" }}>
           <label style={{ fontSize:12, color:"#888", fontWeight:"bold" }}>POSIZIONE FISSA PER STUDENTE</label>
           <div style={{ fontSize:12, color:"#aaa", marginTop:4, marginBottom:10 }}>
-            Vincola uno studente a stare sempre in prima fila, ultima fila, o vicino al corridoio (es. per esigenze di vista, uscite frequenti).
+            Vincola uno studente a stare sempre in una fila specifica (es. per esigenze di vista o di attenzione).
           </div>
           {students.length === 0 ? (
             <div style={{ fontSize:12, color:"#aaa", fontStyle:"italic" }}>Aggiungi prima gli studenti nella tab Studenti.</div>
